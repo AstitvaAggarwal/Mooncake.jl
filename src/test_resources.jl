@@ -10,6 +10,7 @@ module TestResources
 using ..Mooncake
 using ..Mooncake:
     CoDual,
+    Dual,
     Tangent,
     MutableTangent,
     NoTangent,
@@ -174,6 +175,14 @@ end
 function make_P_union_array(T=Float32)
     return P_union_nothing_array{T}(T(1.0), nothing)
 end
+
+# https://github.com/chalk-lab/Mooncake.jl/issues/631
+struct P_adam_like
+    alphas::Vector{Float64}
+    values::Vector{Float64}
+    slopes::Vector{Float64}
+end
+const P_adam_like_union = Union{Nothing,P_adam_like}
 
 function build_big_isbits_struct()
     return FourFields(
@@ -568,6 +577,9 @@ end
 @noinline edge_case_tester(x::Int) = 10
 @noinline edge_case_tester(x::String) = "hi"
 @is_primitive MinimalCtx Tuple{typeof(edge_case_tester),Float64}
+function Mooncake.frule!!(::Dual{typeof(edge_case_tester)}, x::Dual{Float64})
+    return Dual(5 * primal(x), 5 * tangent(x))
+end
 function Mooncake.rrule!!(::CoDual{typeof(edge_case_tester)}, x::CoDual{Float64})
     edge_case_tester_pb!!(dy) = Mooncake.NoRData(), 5 * dy
     return Mooncake.zero_fcodual(5 * primal(x)), edge_case_tester_pb!!
@@ -977,6 +989,6 @@ end
 
 using .TestResources
 
-function generate_derived_rrule!!_test_cases(rng_ctor, ::Val{:test_resources})
+function derived_rule_test_cases(rng_ctor, ::Val{:test_resources})
     return TestResources.generate_test_functions(), Any[]
 end

@@ -149,9 +149,9 @@ end
 Equivalent to `value_and_pullback!!(rule, 1.0, f, x...)`, and assumes `f` returns a
 `Union{Float16,Float32,Float64}`.
 
-*Note:* There are lots of subtle ways to mis-use `value_and_pullback!!`, so we generally
+*Note:* There are lots of subtle ways to mis-use [`value_and_pullback!!`](@ref), so we generally
 recommend using `Mooncake.value_and_gradient!!` (this function) where possible. The
-docstring for `value_and_pullback!!` is useful for understanding this function though.
+docstring for [`value_and_pullback!!`](@ref) is useful for understanding this function though.
 
 An example:
 ```jldoctest
@@ -196,9 +196,10 @@ end
 
 """
     __exclude_unsupported_output(y)
+    __exclude_func_with_unsupported_output(fx)
 
-Required for the robust design of [`value_and_pullback`](@ref), [`prepare_pullback_cache`](@ref).  
-Ensures that `y` contains no aliasing, circular references, `Ptr`s or non differentiable datatypes. 
+Required for the robust design of [`value_and_pullback!!`](@ref), [`prepare_pullback_cache`](@ref).
+Ensures that `y` or returned value of `fx::Tuple{Tf, Targs...}` contains no aliasing, circular references, `Ptr`s or non differentiable datatypes. 
 In the forward pass f(args...) output can only return a "Tree" like datastructure with leaf nodes as primitive types.  
 Refer https://github.com/chalk-lab/Mooncake.jl/issues/517#issuecomment-2715202789 and related issue for details.  
 Internally calls [`__exclude_unsupported_output_internal!`](@ref).
@@ -207,6 +208,13 @@ The design is modelled after `zero_tangent`.
 function __exclude_unsupported_output(y::T) where {T}
     __exclude_unsupported_output_internal!(y, Set{UInt}())
     return nothing
+end
+
+function __exclude_func_with_unsupported_output(fx)
+    _fx = deepcopy(fx)
+    _func, _args = _fx[1], _fx[2:end]
+    _y = _func(_args...)
+    __exclude_unsupported_output(_y)
 end
 
 """
@@ -305,7 +313,7 @@ function _copy_to_output!!(dst::P, src::P) where {P}
 
         # when immutable struct object created by non initializing inner constructor. (Base.deepcopy misses this out)
         !isassigned(flds, 1) && return src
-        return ccall(:jl_new_structv, Any, (Any, Ptr{Any}, UInt32), P, flds, nf)
+        return ccall(:jl_new_structv, Any, (Any, Ptr{Any}, UInt32), P, flds, nf)::P
     end
 end
 
@@ -319,15 +327,18 @@ _copy_output(x::SimpleVector) = Core.svec([map(_copy_output, x_sub) for x_sub in
 
 # Array, Memory
 function _copy_output(x::P) where {P<:_BuiltinArrays}
-    temp = P(undef, size(x)...)
+    temp = similar(x)
+    Tx = eltype(P)
     @inbounds for i in eachindex(temp)
-        isassigned(x, i) && (temp[i] = _copy_output(x[i]))
+        if isassigned(x, i)
+            temp[i] = _copy_output(x[i])::Tx
+        end
     end
-    return temp
+    return temp::P
 end
 
 # Tuple, NamedTuple
-_copy_output(x::Union{Tuple,NamedTuple}) = map(_copy_output, x)
+_copy_output(x::Union{Tuple,NamedTuple}) = map(_copy_output, x)::typeof(x)
 
 # mutable composite types, bitstype
 function _copy_output(x::P) where {P}
@@ -335,35 +346,48 @@ function _copy_output(x::P) where {P}
     nf = nfields(P)
 
     if ismutable(x)
-        temp = ccall(:jl_new_struct_uninit, Any, (Any,), P)
-        for x_sub in 1:nf
-            if isdefined(x, x_sub)
+        _copy_output_mutable_cartesian(x, Val(nf))
+    else
+        _copy_output_immutable_cartesian(x, Val(nf))
+    end
+end
+
+@generated function _copy_output_mutable_cartesian(x::P, ::Val{nf}) where {P,nf}
+    quote
+        temp = ccall(:jl_new_struct_uninit, Any, (Any,), P)::P
+        Base.Cartesian.@nexprs(
+            $nf,
+            i -> if isdefined(x, i)
                 ccall(
                     :jl_set_nth_field,
                     Cvoid,
                     (Any, Csize_t, Any),
                     temp,
-                    x_sub - 1,
-                    _copy_output(getfield(x, x_sub)),
+                    i - 1,
+                    _copy_output(getfield(x, i)),
                 )
             end
-        end
+        )
+        return temp::P
+    end
+end
 
-        return temp
-    else
-        flds = Vector{Any}(undef, nf)
-        for x_sub in 1:nf
-            if isdefined(x, x_sub)
-                flds[x_sub] = _copy_output(getfield(x, x_sub))
-            else
-                nf = x_sub - 1  # Assumes if a undefined field is found, all subsequent fields are undefined.
-                break
-            end
-        end
-
+@generated function _copy_output_immutable_cartesian(x::P, ::Val{nf}) where {P,nf}
+    quote
+        Base.Cartesian.@nif(
+            $(nf + 1),
+            # Assumes if a undefined field is found, all subsequent fields are undefined.
+            i -> !isdefined(x, i),
+            i -> _copy_output_immutable_cartesian_upto(x, Val(i - 1)),
+        )
+    end
+end
+@generated function _copy_output_immutable_cartesian_upto(x::P, ::Val{idx}) where {P,idx}
+    idx == 0 && return :(x)
+    return quote
+        flds = collect(Any, Base.Cartesian.@ntuple($idx, i -> _copy_output(getfield(x, i))))
         # when immutable struct object created by non initializing inner constructor. (Base.deepcopy misses this out)
-        !isassigned(flds, 1) && return x
-        return ccall(:jl_new_structv, Any, (Any, Ptr{Any}, UInt32), P, flds, nf)
+        return ccall(:jl_new_structv, Any, (Any, Ptr{Any}, UInt32), P, flds, $idx)::P
     end
 end
 
@@ -404,17 +428,18 @@ end
 
 Returns a cache used with [`value_and_pullback!!`](@ref). See that function for more info.
 """
-function prepare_pullback_cache(fx...; kwargs...)
+@unstable function prepare_pullback_cache(fx...; kwargs...)
+
+    # Check that the output of `fx` is supported.
+    __exclude_func_with_unsupported_output(fx)
 
     # Construct rule and tangents.
-    rule = build_rrule(get_interpreter(), Tuple{map(_typeof, fx)...}; kwargs...)
+    interp = get_interpreter(ReverseMode)
+    rule = build_rrule(interp, Tuple{map(_typeof, fx)...}; kwargs...)
     tangents = map(zero_tangent, fx)
 
     # Run the rule forwards -- this should do a decent chunk of pre-allocation.
     y, rvs!! = rule(map((x, dx) -> CoDual(x, fdata(dx)), fx, tangents)...)
-
-    # Handle forward pass's primal exceptions
-    __exclude_unsupported_output(y)
 
     # Run reverse-pass in order to reset stacks + state.
     rvs!!(zero_rdata(primal(y)))
@@ -479,7 +504,7 @@ end
 
 Returns a cache used with [`value_and_gradient!!`](@ref). See that function for more info.
 """
-function prepare_gradient_cache(fx...; kwargs...)
+@unstable function prepare_gradient_cache(fx...; kwargs...)
     rule = build_rrule(fx...; kwargs...)
     tangents = map(zero_tangent, fx)
     y, rvs!! = rule(map((x, dx) -> CoDual(x, fdata(dx)), fx, tangents)...)
@@ -530,3 +555,19 @@ function value_and_gradient!!(cache::Cache, f::F, x::Vararg{Any,N}) where {F,N}
     coduals = tuple_map(CoDual, (f, x...), tuple_map(set_to_zero!!, cache.tangents))
     return __value_and_gradient!!(cache.rule, coduals...)
 end
+
+"""
+    prepare_derivative_cache(f, x...)
+
+Returns a cache used with [`value_and_derivative!!`](@ref). See that function for more info.
+"""
+@unstable prepare_derivative_cache(fx...; kwargs...) = build_frule(fx...; kwargs...)
+
+"""
+    value_and_derivative!!(rule::R, f::Dual, x::Vararg{Dual,N})
+
+Returns a `Dual` containing the result of applying forward-mode AD to compute the (Frechet)
+derivative of `primal(f)` at the primal values in `x` in the direction of the tangent values
+in `f` and `x`.
+"""
+value_and_derivative!!(rule::R, fx::Vararg{Dual,N}) where {R,N} = rule(fx...)

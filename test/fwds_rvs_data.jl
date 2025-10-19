@@ -1,4 +1,5 @@
 module FwdsRvsDataTestResources
+
 struct Foo{A} end
 struct Bar{A,B,C}
     a::A
@@ -23,9 +24,17 @@ end
         @test fdata_type(tangent_type(P)) == F
         @test rdata_type(tangent_type(P)) == R
     end
+    @test_throws ErrorException(
+        "Int64 is a primitive type. Implement a method of `rdata_type` for it."
+    ) rdata_type(Int64)
+    @test_throws ErrorException(
+        "Int64 is a primitive type. Implement a method of `fdata_type` for it."
+    ) fdata_type(Int64)
+
     @testset "$(typeof(p))" for (_, p, _...) in Mooncake.tangent_test_cases()
         TestUtils.test_tangent_splitting(Xoshiro(123456), p)
-        # Test for unions involving `Nothing`. See, 
+    end
+    @testset "Test for unions involving `Nothing`" begin
         # https://github.com/chalk-lab/Mooncake.jl/issues/597 for the reason.
         TestUtils.test_tangent_splitting(
             Xoshiro(123456), TestResources.make_P_union_nothing(); test_opt_flag=false
@@ -33,6 +42,11 @@ end
         # https://github.com/chalk-lab/Mooncake.jl/issues/598
         TestUtils.test_tangent_splitting(
             Xoshiro(123456), TestResources.make_P_union_array(); test_opt_flag=false
+        )
+
+        # https://github.com/chalk-lab/Mooncake.jl/issues/631
+        TestUtils.test_tangent_splitting(
+            Xoshiro(123456), TestResources.P_adam_like_union; test_opt_flag=false
         )
     end
 
@@ -58,6 +72,15 @@ end
         @test can_produce_zero_rdata_from_type(Union{Tuple{Int},Tuple{Int,Int}})
         @test zero_rdata_from_type(Union{Tuple{Int},Tuple{Int,Int}}) == NoRData()
         @test zero_rdata_from_type(Union{Float64,Int}) == CannotProduceZeroRDataFromType()
+        # Regression tests for https://github.com/chalk-lab/Mooncake.jl/issues/704
+        @test zero_rdata_from_type(
+            Union{
+                ConsoleLogger,
+                Base.CoreLogging.NullLogger,
+                Base.CoreLogging.SimpleLogger,
+                TestLogger,
+            },
+        ) == NoRData()
 
         # Edge case: Types with unbound type parameters.
         P = (Type{T} where {T}).body
@@ -150,5 +173,10 @@ end
             @test verify_fdata_value(Ptr{Float64}(), Ptr{Float64}()) === nothing
             @test verify_rdata_value(Ptr{Float64}(), NoRData()) === nothing
         end
+    end
+
+    @testset "Helpful error messages for misuse of fdata and rdata" begin
+        @test_throws "Float64 is a type. Perhaps you meant" fdata(Float64)
+        @test_throws "Float64 is a type. Perhaps you meant" rdata(Float64)
     end
 end

@@ -20,6 +20,7 @@ struct PossiblyUninitTangent{T}
     PossiblyUninitTangent{T}() where {T} = new{T}()
 end
 
+# Copy only if initialized, otherwise create new uninitialized instance
 _copy(x::P) where {P<:PossiblyUninitTangent} = is_init(x) ? P(_copy(x.tangent)) : P()
 
 @inline PossiblyUninitTangent(tangent::T) where {T} = PossiblyUninitTangent{T}(tangent)
@@ -28,8 +29,9 @@ _copy(x::P) where {P<:PossiblyUninitTangent} = is_init(x) ? P(_copy(x.tangent)) 
 @inline is_init(t::PossiblyUninitTangent) = isdefined(t, :tangent)
 is_init(t) = true
 
-val(x::PossiblyUninitTangent) = is_init(x) ? x.tangent : error("Uninitialised")
-val(x) = x
+@unstable @inline val(x::PossiblyUninitTangent) =
+    (!is_init(x) && error("Uninitialised"); x.tangent)
+@inline val(x) = x
 
 """
     Tangent{Tfields<:NamedTuple}
@@ -77,9 +79,13 @@ Has the same semantics that `getfield!` would have if the data in the `fields` f
 were actually fields of `t`. This is the moral equivalent of `getfield` for
 `MutableTangent`.
 """
-@inline get_tangent_field(t::PossiblyMutableTangent, i::Int) = val(getfield(t.fields, i))
+@unstable @inline get_tangent_field(t::PossiblyMutableTangent, i::Int) = val(
+    getfield(t.fields, i)
+)
 
-@inline function get_tangent_field(t::PossiblyMutableTangent{F}, s::Symbol) where {F}
+@unstable @inline function get_tangent_field(
+    t::PossiblyMutableTangent{F}, s::Symbol
+) where {F}
     return get_tangent_field(t, _sym_to_int(F, Val(s)))
 end
 
@@ -109,7 +115,7 @@ end
     return findfirst(==(s), fieldnames(Tfields))
 end
 
-function tangent_field_types_exprs(P::Type)
+@unstable function tangent_field_types_exprs(P::Type)
     tangent_type_exprs = map(fieldtypes(P), always_initialised(P)) do _P, init
         T_expr = Expr(:call, :tangent_type, _P)
         return init ? T_expr : Expr(:curly, PossiblyUninitTangent, T_expr)
@@ -123,18 +129,40 @@ end
     return Expr(:call, :tuple, tangent_field_types_exprs(P)...)
 end
 
-function build_tangent(::Type{P}, fields...) where {P}
-    fields = map(enumerate(tangent_field_types(P))) do (n, tt)
-        tt <: PossiblyUninitTangent && return n <= length(fields) ? tt(fields[n]) : tt()
-        return fields[n]
+function build_tangent(::Type{P}, fields::Vararg{Any,N}) where {P,N}
+    TP = tangent_type(P)
+    _ftypes = tangent_field_types(P)
+    ftypes = Tuple{_ftypes...}
+    fnames = fieldnames(P)
+    return _build_tangent_cartesian(
+        TP, fields, ftypes, Val(fnames), Val(length(_ftypes))
+    )::TP
+end
+@generated function _build_tangent_cartesian(
+    ::Type{TP}, fields::Tuple{Vararg{Any,N}}, ::Type{ftypes}, ::Val{fnames}, ::Val{nfields}
+) where {TP,N,ftypes,fnames,nfields}
+    quote
+        full_fields = Base.Cartesian.@ntuple(
+            $nfields, n -> let
+                tt = ftypes.types[n]
+                if tt <: PossiblyUninitTangent
+                    n <= $N ? tt(fields[n]) : tt()
+                else
+                    fields[n]
+                end
+            end
+        )
+        return TP(NamedTuple{$fnames}(full_fields))
     end
-    return tangent_type(P)(NamedTuple{fieldnames(P)}(fields))
 end
 
-function build_tangent(::Type{P}, fields...) where {P<:Union{Tuple,NamedTuple}}
-    tangent_type(P) == NoTangent && return NoTangent()
-    isconcretetype(P) && return tangent_type(P)(fields)
-    return __tangent_from_non_concrete(P, fields)
+function build_tangent(
+    ::Type{P}, fields::Vararg{Any,N}
+) where {P<:Union{Tuple,NamedTuple},N}
+    TP = tangent_type(P)
+    TP === NoTangent && return NoTangent()::TP
+    isconcretetype(P) && return TP(fields)
+    return __tangent_from_non_concrete(P, fields)::TP
 end
 
 """
@@ -287,7 +315,7 @@ tangent_type(::Type{<:Type}) = NoTangent
 
 tangent_type(::Type{<:TypeVar}) = NoTangent
 
-@foldable tangent_type(::Type{Ptr{P}}) where {P} = Ptr{tangent_type(P)}
+@unstable @foldable tangent_type(::Type{Ptr{P}}) where {P} = Ptr{tangent_type(P)}
 
 tangent_type(::Type{<:Ptr}) = NoTangent
 
@@ -309,11 +337,11 @@ tangent_type(::Type{Expr}) = NoTangent
 
 tangent_type(::Type{Core.TypeofVararg}) = NoTangent
 
-tangent_type(::Type{SimpleVector}) = Vector{Any}
+@unstable tangent_type(::Type{SimpleVector}) = Vector{Any}
 
 tangent_type(::Type{P}) where {P<:Union{UInt8,UInt16,UInt32,UInt64,UInt128}} = NoTangent
 
-tangent_type(::Type{P}) where {P<:Union{Int8,Int16,Int32,Int64,Int128}} = NoTangent
+tangent_type(::Type{P}) where {P<:Union{Int8,Int16,Int32,Int64,Int128,BigInt}} = NoTangent
 
 tangent_type(::Type{<:Core.Builtin}) = NoTangent
 
@@ -325,7 +353,7 @@ tangent_type(::Type{String}) = NoTangent
 
 @foldable tangent_type(::Type{<:Array{P,N}}) where {P,N} = Array{tangent_type(P),N}
 
-tangent_type(::Type{<:Array{P,N} where {P}}) where {N} = Array
+@unstable tangent_type(::Type{<:Array{P,N} where {P}}) where {N} = Array
 
 tangent_type(::Type{<:MersenneTwister}) = NoTangent
 
@@ -342,6 +370,24 @@ tangent_type(::Type{<:Enum}) = NoTangent
 tangent_type(::Type{<:Base.TTY}) = NoTangent
 
 tangent_type(::Type{<:IOStream}) = NoTangent
+
+tangent_type(::Type{<:Base.CoreLogging.AbstractLogger}) = NoTangent
+
+tangent_type(::Type{Core.CodeInstance}) = NoTangent
+
+tangent_type(::Type{Core.MethodInstance}) = NoTangent
+
+tangent_type(::Type{Core.Binding}) = NoTangent
+
+tangent_type(::Type{Core.Compiler.InferenceState}) = NoTangent
+
+tangent_type(::Type{Core.Compiler.Timings.Timing}) = NoTangent
+
+tangent_type(::Type{Core.Compiler.InferenceResult}) = NoTangent
+
+@static if VERSION >= v"1.11"
+    tangent_type(::Type{Core.Compiler.AnalysisResults}) = NoTangent
+end
 
 function split_union_tuple_type(tangent_types)
 
@@ -409,7 +455,7 @@ isconcrete_or_union(p) = p isa Union || isconcretetype(p)
     end
 end
 
-@foldable function tangent_type(::Type{P}) where {N,P<:NamedTuple{N}}
+@unstable @foldable function tangent_type(::Type{P}) where {N,P<:NamedTuple{N}}
     P isa Union && return Union{tangent_type(P.a),tangent_type(P.b)}
     !isconcretetype(P) && return Union{NoTangent,NamedTuple{N}}
     TT = tangent_type(Tuple{fieldtypes(P)...})
@@ -650,7 +696,161 @@ end
     end
 end
 
+"""
+    require_tangent_cache(::Type{P}) where {P}
+
+Determines whether operations on tangents of primal type `P` require a cache to handle potential 
+circular references or aliasing. Returns `Val{true}()` if caching is required (the default),
+or `Val{false}()` if tangents of type `tangent_type(P)` are guaranteed to be free of circular references,
+uninitialized fields that could create circular references, and aliasing.
+
+This function is used internally by operations like `set_to_zero!!`. Returning `Val{false}()` 
+can improve performance by avoiding cache overhead, but is only safe when the memory layout
+of the tangent type is provably tree-like. 
+
+!!! warning "Advanced Performance Optimization"
+    This is an advanced optimization hook. The default behavior (returning `Val{true}()`)
+    is always correct but may have performance overhead. Only implement custom methods
+    if you have:
+    1. Measured a significant performance impact from caching
+    2. Proven your tangent types cannot contain circular references or aliasing
+    3. Thoroughly tested your implementation
+    
+    See the Extended Help section for detailed safety requirements and examples.
+
+# Extended help
+
+### Understanding Tangent Caching
+
+This function makes decisions based on the primal type `P` by answering the key question:
+"Could tangents of type `tangent_type(P)` contain circular references or aliasing?"
+
+The cache prevents infinite loops and incorrect results when traversing tangents that might contain:
+- Circular references (A references B, B references A)
+- Aliasing (multiple references to the same object)
+
+### Safety Requirements for `Val{false}()`
+
+Returning `Val{false}()` is only safe when the tangent type memory layout is guaranteed to be tree-like,
+with no possibility of circular references or aliasing.
+
+#### Safe Cases (non-exhaustive, can return `Val{false}()`):
+
+1. **Pure immutable structures**: Structures with only `Tangent` types (no `MutableTangent`)
+   cannot create cycles because immutable objects cannot reference themselves after construction
+   
+2. **Concrete-only mutable structs**: `MutableTangent` types where ALL fields have concrete types
+   that cannot hold references (e.g., `mutable struct Foo; x::Float64; end`)
+   
+3. **Concrete `PossiblyUninitTangent`**: When parameterized by concrete non-reference types
+   like `PossiblyUninitTangent{Float64}`. For example, `mutable struct Bar; x::Ref{Float64}; end` 
+   produces this safe tangent type because `Ref{Float64}` is concrete
+
+#### Unsafe Cases (non-exhaustive, must return `Val{true}()`): 
+
+1. **Abstract typed fields**: Any field typed as `Any` or other abstract types can hold
+   arbitrary values at runtime, including circular references
+   
+2. **Potentially self-referential types**: Types where fields could reference the containing object,
+   either directly or through a chain of references
+   
+3. **Shared mutable state**: Multiple fields that might reference the same mutable object,
+   creating aliasing issues
+
+### Common Patterns Requiring Caching
+
+The following examples demonstrate why certain patterns create circular references or aliasing in tangents,
+requiring caching to avoid infinite loops or incorrect results.
+
+#### Example 1: Circular References with Abstract-Typed Fields
+
+`Ref` with abstract types can lead to circular references:
+
+```jldoctest
+julia> # Ref{Any} is dangerous because Any can hold circular references
+       struct Evil
+           r::Ref{Any}
+           data::Float64
+       end
+
+julia> e = Evil(Ref{Any}(nothing), 1.0);
+
+julia> e.r[] = e;  # Store the struct in its own field!
+
+julia> # The tangent type has PossiblyUninitTangent{Any}
+       tangent_type(Evil)
+Tangent{@NamedTuple{r, data::Float64}}
+
+julia> # Let's trace what happens with zero_tangent
+       zt = zero_tangent(e);
+
+julia> # The Ref field's tangent is a MutableTangent
+       typeof(zt.fields.r)
+MutableTangent{@NamedTuple{x::Mooncake.PossiblyUninitTangent{Any}}}
+
+julia> # And it contains a circular reference to zt itself!
+       zt.fields.r.fields.x.tangent === zt
+true
+```
+
+#### Example 2: Aliasing in Tangent Structures
+
+When a primal contains aliased references, the tangent must preserve this aliasing for correctness.
+Without caching, operations would incorrectly process aliased tangents multiple times:
+
+```jldoctest
+julia> # Create a mutable primal with aliased references
+       mutable struct Container
+           data::Vector{Float64}
+       end
+
+julia> x = Container([1.0, 2.0, 3.0]);
+
+julia> # Create aliasing: both fields reference the same Container
+       primal_object = (x, x);
+
+julia> # The tangent preserves the aliasing structure
+       zt = zero_tangent(primal_object);
+
+julia> # Verify the tangent type: tuple of two MutableTangents
+       typeof(zt)
+Tuple{MutableTangent{@NamedTuple{data::Vector{Float64}}}, MutableTangent{@NamedTuple{data::Vector{Float64}}}}
+
+julia> # Crucially, both elements are the SAME tangent object (aliased)
+       zt[1] === zt[2]
+true
+```
+
+This aliasing is essential for correctness! If `zt[1]` and `zt[2]` were different objects, 
+the tangent wouldn't correctly represent derivatives w.r.t. the shared primal `x`.
+
+The aliasing in tangents mirrors the aliasing in primals. Without caching to track visited 
+objects, operations like [`increment!!`](@ref) would visit `zt[1]` and `zt[2]` separately, not 
+realizing they're the same object. This would lead to double-counting, incrementing the 
+same tangent twice and producing incorrect results.
+
+"""
+require_tangent_cache(::Type{P}) where {P} = Val{!isbitstype(P)}()
+require_tangent_cache(::Type{<:Array{P}}) where {P} = Val{!isbitstype(P)}()
+
 const IncCache = Union{NoCache,IdDict{Any,Bool}}
+const SetToZeroCache = Union{NoCache,Vector{UInt}}
+
+"""
+    _already_tracked!(c::SetToZeroCache, x)
+
+Check if an object has already been tracked and add it to the cache if not.
+Returns `true` if the object was already tracked, `false` otherwise.
+Mutates the cache by adding untracked objects.
+"""
+@inline function _already_tracked!(c::Vector{UInt}, x)
+    oid = objectid(x)
+    oid in c && return true
+    push!(c, oid)
+    return false
+end
+
+@inline _already_tracked!(::NoCache, x) = false
 
 """
     increment!!(x::T, y::T) where {T}
@@ -672,7 +872,7 @@ counting". If `c` is a `NoCache`, assume no aliasing or circular referencing.
 increment_internal!!(::IncCache, ::NoTangent, ::NoTangent) = NoTangent()
 increment_internal!!(::IncCache, x::T, y::T) where {T<:IEEEFloat} = x + y
 function increment_internal!!(::IncCache, x::Ptr{T}, y::Ptr{T}) where {T}
-    return x === y ? x : throw(error("eurgh"))
+    return x === y ? x : throw(error("Incrementing pointers is not supported!"))
 end
 @generated function increment_internal!!(c::IncCache, x::T, y::T) where {T<:Tuple}
     inc_exprs = map(n -> :(increment_internal!!(c, x[$n], y[$n])), 1:fieldcount(T))
@@ -703,28 +903,29 @@ end
 
 Set `x` to its zero element (`x` should be a tangent, so the zero must exist).
 """
-set_to_zero!!(x) = set_to_zero_internal!!(IdDict{Any,Bool}(), x)
+set_to_zero!!(x) = set_to_zero!!(x, require_tangent_cache(typeof(x)))
+set_to_zero!!(x, ::Val{true}) = set_to_zero_internal!!(Vector{UInt}(), x)
+set_to_zero!!(x, ::Val{false}) = set_to_zero_internal!!(NoCache(), x)
 
 """
-    set_to_zero_internal!!(c::IncCache, x)
+    set_to_zero_internal!!(c::SetToZeroCache, x)
 
 Implementation for [`Mooncake.set_to_zero!!`](@ref). Use `c` to ensure that circular
 references are correctly handled. If `c` is a `NoCache`, assume no circular references.
 """
-set_to_zero_internal!!(::IncCache, ::NoTangent) = NoTangent()
-set_to_zero_internal!!(::IncCache, x::Base.IEEEFloat) = zero(x)
-function set_to_zero_internal!!(c::IncCache, x::Union{Tuple,NamedTuple})
+set_to_zero_internal!!(::SetToZeroCache, ::NoTangent) = NoTangent()
+set_to_zero_internal!!(::SetToZeroCache, x::Base.IEEEFloat) = zero(x)
+function set_to_zero_internal!!(c::SetToZeroCache, x::Union{Tuple,NamedTuple})
     return tuple_map(Base.Fix1(set_to_zero_internal!!, c), x)
 end
-function set_to_zero_internal!!(c::IncCache, x::T) where {T<:PossiblyUninitTangent}
+function set_to_zero_internal!!(c::SetToZeroCache, x::T) where {T<:PossiblyUninitTangent}
     return is_init(x) ? T(set_to_zero_internal!!(c, val(x))) : x
 end
-function set_to_zero_internal!!(c::IncCache, x::T) where {T<:Tangent}
+function set_to_zero_internal!!(c::SetToZeroCache, x::T) where {T<:Tangent}
     return T(set_to_zero_internal!!(c, x.fields))
 end
-function set_to_zero_internal!!(c::IncCache, x::MutableTangent)
-    haskey(c, x) && return x
-    setindex!(c, false, x)
+function set_to_zero_internal!!(c::SetToZeroCache, x::MutableTangent)
+    _already_tracked!(c, x) && return x
     x.fields = set_to_zero_internal!!(c, x.fields)
     return x
 end
@@ -748,8 +949,8 @@ Implementation for [`_scale`](@ref). Use `c` to handle circular references and a
 """
 _scale_internal(::MaybeCache, ::Float64, ::NoTangent) = NoTangent()
 _scale_internal(::MaybeCache, a::Float64, t::T) where {T<:IEEEFloat} = T(a * t)
-function _scale_internal(c::MaybeCache, a::Float64, t::Union{Tuple,NamedTuple})
-    return map(t -> _scale_internal(c, a, t), t)
+@unstable function _scale_internal(c::MaybeCache, a::Float64, t::Union{Tuple,NamedTuple})
+    return map(ti -> _scale_internal(c, a, ti)::typeof(ti), t)
 end
 function _scale_internal(c::MaybeCache, a::Float64, t::T) where {T<:PossiblyUninitTangent}
     return is_init(t) ? T(_scale_internal(c, a, val(t))) : T()
@@ -829,7 +1030,7 @@ Here, the value returned by `_add_to_primal` will satisfy the invariant asserted
 inner constructor for `Foo`.
 """
 function _add_to_primal(p, t, unsafe::Bool=false)
-    return _add_to_primal_internal(IdDict{Any,Any}(), p, t, unsafe)
+    return _add_to_primal_internal(IdDict{Any,Any}(), p, t, unsafe)::typeof(p)
 end
 
 """
@@ -850,10 +1051,10 @@ function _add_to_primal_internal(
     return x′
 end
 function _add_to_primal_internal(c::MaybeCache, x::Tuple, t::Tuple, unsafe::Bool)
-    return _map((x, t) -> _add_to_primal_internal(c, x, t, unsafe), x, t)
+    return _map((x, t) -> _add_to_primal_internal(c, x, t, unsafe), x, t)::typeof(x)
 end
 function _add_to_primal_internal(c::MaybeCache, x::NamedTuple, t::NamedTuple, unsafe::Bool)
-    return _map((x, t) -> _add_to_primal_internal(c, x, t, unsafe), x, t)
+    return _map((x, t) -> _add_to_primal_internal(c, x, t, unsafe), x, t)::typeof(x)
 end
 
 struct AddToPrimalException <: Exception
@@ -913,7 +1114,7 @@ function _add_to_primal_internal(
         !isdefined(p, f) && !is_init(tf) && return FieldUndefined()
         throw(error("unable to handle undefined-ness"))
     end
-    return __construct_type(P, unsafe, fields...)
+    return __construct_type(P, unsafe, fields...)::P
 end
 
 function _add_to_primal_internal(
@@ -960,7 +1161,7 @@ function _add_to_primal_internal(
             setfield!(p′, f, _add_to_primal_internal(c, getfield(p, f), val(tf), unsafe))
         end
     end
-    return p′
+    return p′::P
 end
 
 """
@@ -971,7 +1172,7 @@ Required for testing.
 Computes the difference between `p` and `q`, which _must_ be of the same type, `P`.
 Returns a tangent of type `tangent_type(P)`.
 """
-_diff(p::P, q::P) where {P} = _diff_internal(IdDict{Any,Any}(), p, q)
+_diff(p::P, q::P) where {P} = _diff_internal(IdDict{Any,Any}(), p, q)::tangent_type(P)
 
 """
     _diff_internal(c::MaybeCache, p::P, q::P) where {P}
@@ -981,12 +1182,14 @@ aliasing. If `c` is a `NoCache` then assume no circular references or aliasing i
 `p` or `q`.
 """
 function _diff_internal(c::MaybeCache, p::P, q::P) where {P}
-    tangent_type(P) === NoTangent && return NoTangent()
+    @assert typeof(p) == typeof(q) # this function implicitly assumes p and q have identical type
+    TP = tangent_type(P)
+    TP === NoTangent && return NoTangent()
     T = Tangent{NamedTuple{(),Tuple{}}}
-    tangent_type(P) === T && return T((;))
+    TP === T && return T((;))
     key = (p, q)
-    haskey(c, key) && return c[key]::tangent_type(P)
-    return _containerlike_diff(c, p, q)
+    haskey(c, key) && return c[key]::TP
+    return _containerlike_diff(c, p, q)::TP
 end
 _diff_internal(::MaybeCache, p::P, q::P) where {P<:IEEEFloat} = p - q
 function _diff_internal(c::MaybeCache, p::P, q::P) where {P<:SimpleVector}
@@ -997,30 +1200,58 @@ function _diff_internal(c::MaybeCache, p::P, q::P) where {P<:SimpleVector}
     return t
 end
 function _diff_internal(c::MaybeCache, p::P, q::P) where {P<:Union{Tuple,NamedTuple}}
-    tangent_type(P) == NoTangent && return NoTangent()
-    return _map((p, q) -> _diff_internal(c, p, q), p, q)
+    TP = tangent_type(P)
+    TP == NoTangent && return NoTangent()
+    return _map((p, q) -> _diff_internal(c, p, q), p, q)::TP
 end
 
 function _containerlike_diff(c::MaybeCache, p::P, q::P) where {P}
-    if ismutabletype(P)
-        t = tangent_type(P)()
-        c[(p, q)] = t
-    end
-    diffed_fields = map(fieldnames(P)) do f
-        if isdefined(p, f) && isdefined(q, f)
-            return _diff_internal(c, getfield(p, f), getfield(q, f))
-        elseif !isdefined(p, f) && !isdefined(q, f)
-            return FieldUndefined()
+    return _containerlike_diff_cartesian(c, p, q, Val(ismutabletype(P)), Val(fieldcount(P)))
+end
+@generated function _containerlike_diff_cartesian(
+    c::MaybeCache, p::P, q::P, ::Val{mutable}, ::Val{nfield}
+) where {P,mutable,nfield}
+    quote
+        t = if mutable
+            _t = tangent_type(P)()
+            c[(p, q)] = _t
+            _t
         else
-            throw(error("Unhandleable undefinedness"))
+            nothing
         end
+        Base.Cartesian.@nif(
+            $(nfield + 1),
+            n -> let
+                defined_p = isdefined(p, n)
+                defined_q = isdefined(q, n)
+                defined_p != defined_q && throw(error("Unhandleable undefinedness"))
+
+                !defined_p
+            end,
+            # We have found the first undefined field, or,
+            # if n == $(nfield + 1), then we have found the last field,
+            # and all fields are defined.
+            n -> _containerlike_diff_cartesian_internal(
+                Val(n), c, p, q, t, Val(mutable), Val(nfield)
+            )
+        )
     end
-    i = findfirst(==(FieldUndefined()), diffed_fields)
-    diffed_fields = i === nothing ? diffed_fields : diffed_fields[1:(i - 1)]
-    if ismutabletype(P)
-        return _build_tangent(P, t, diffed_fields...)
-    else
-        return build_tangent(P, diffed_fields...)
+end
+@generated function _containerlike_diff_cartesian_internal(
+    ::Val{n}, c::MaybeCache, p::P, q::P, t, ::Val{mutable}, ::Val{nfield}
+) where {P,n,mutable,nfield}
+    quote
+        diffed_fields = Base.Cartesian.@ntuple(
+            $(n - 1),
+            m -> _diff_internal(
+                c, getfield(p, m), getfield(q, m)
+            )::tangent_type(fieldtype(P, m))
+        )
+        if mutable
+            return _build_tangent(P, t, diffed_fields...)
+        else
+            return build_tangent(P, diffed_fields...)
+        end
     end
 end
 
@@ -1080,8 +1311,8 @@ function increment_field!!(x::MutableTangent{T}, y, f::V) where {T,F,V<:Val{F}}
     return x
 end
 
-increment_field!!(x, y, f::Symbol) = increment_field!!(x, y, Val(f))
-increment_field!!(x, y, n::Int) = increment_field!!(x, y, Val(n))
+@unstable @inline increment_field!!(x, y, f::Symbol) = increment_field!!(x, y, Val(f))
+@unstable @inline increment_field!!(x, y, n::Int) = increment_field!!(x, y, Val(n))
 
 # Fallback method for when a tangent type for a struct is declared to be `NoTangent`.
 for T in [Symbol, Int, Val]
@@ -1107,7 +1338,7 @@ If the returned tuple has 5 elements, then the elements are interpreted as follo
 Test cases in the first format make use of `zero_tangent` / `randn_tangent` etc to generate
 tangents, but they're unable to check that `increment!!` is correct in an absolute sense.
 """
-function tangent_test_cases()
+@unstable function tangent_test_cases()
     N_large = 33
     _names = Tuple(map(n -> Symbol("x$n"), 1:N_large))
 
@@ -1137,10 +1368,12 @@ function tangent_test_cases()
         (UnitRange{Int}(5, 7), NoTangent),
         (Array, NoTangent),
         (Float64, NoTangent),
+        (BigInt, NoTangent),
         (Union{Float64,Float32}, NoTangent),
         (Union, NoTangent),
         (UnionAll, NoTangent),
         (typeof(<:), NoTangent),
+        (Base.CoreLogging.SimpleLogger, NoTangent),
         (IOStream(""), NoTangent),
     ]
     # Construct test cases containing circular references. These typically require multiple
