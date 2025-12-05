@@ -317,10 +317,16 @@ function _copy_to_output!!(dst::P, src::P) where {P}
     end
 end
 
-function _copy_to_output!!(dst, src)
+# fallback for invalid type combinations
+function _copy_to_output!!(dst::T, src::P) where {T,P}
     throw(
-        "When calling _copy_to_output!!, the types of dst and src must be the same. " *
-        "dst passed is of type $(typeof(dst)), while src is a $(typeof(src)).",
+        ArgumentError(
+            "Mooncake.jl does not currently have a method " *
+            "`_copy_to_output!!` to handle this type combination: " *
+            "dst passed is of type $T, while src is a $P. " *
+            "This often happens when differentiating over " *
+            "non-differentiable types (e.g. integers or booleans).",
+        ),
     )
 end
 
@@ -588,7 +594,7 @@ function value_and_gradient!!(
 end
 
 """
-    prepare_derivative_cache(f, x...)
+    prepare_derivative_cache(fx...; kwargs...)
 
 Returns a cache used with [`value_and_derivative!!`](@ref). See that function for more info.
 """
