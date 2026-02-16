@@ -39,7 +39,14 @@ using Core.Compiler: IRCode, NewInstruction
 using Core.Intrinsics: pointerref, pointerset
 using LinearAlgebra.BLAS: @blasfunc, BlasInt, trsm!, BlasFloat
 using LinearAlgebra.LAPACK: getrf!, getrs!, getri!, trtrs!, potrf!, potrs!
-using DispatchDoctor: @stable, @unstable
+using DispatchDoctor: @stable, @unstable, DispatchDoctor
+
+DispatchDoctor.register_macro!(
+    Symbol("@foldable"), DispatchDoctor.IncompatibleMacro, @__MODULE__
+)
+DispatchDoctor.register_macro!(
+    Symbol("@mooncake_overlay"), DispatchDoctor.IncompatibleMacro, @__MODULE__
+)
 
 # Needs to be defined before various other things.
 function _foreigncall_ end
@@ -104,10 +111,10 @@ build_primitive_rrule(::Type{<:Tuple}) = rrule!!
 #! format: off
 @stable default_mode = "disable" default_union_limit = 2 begin
 include("utils.jl")
-include("tangents.jl")
-include("dual.jl")
-include("fwds_rvs_data.jl")
-include("codual.jl")
+include(joinpath("tangents", "tangents.jl"))
+include(joinpath("tangents", "dual.jl"))
+include(joinpath("tangents", "fwds_rvs_data.jl"))
+include(joinpath("tangents", "codual.jl"))
 include("debug_mode.jl")
 include("stack.jl")
 
@@ -128,31 +135,34 @@ end
 include("tools_for_rules.jl")
 @unstable include("test_utils.jl")
 @unstable include("test_resources.jl")
-
-include(joinpath("rrules", "avoiding_non_differentiable_code.jl"))
-include(joinpath("rrules", "blas.jl"))
-include(joinpath("rrules", "builtins.jl"))
-include(joinpath("rrules", "dispatch_doctor.jl"))
-include(joinpath("rrules", "fastmath.jl"))
-include(joinpath("rrules", "foreigncall.jl"))
-include(joinpath("rrules", "iddict.jl"))
-include(joinpath("rrules", "lapack.jl"))
-include(joinpath("rrules", "linear_algebra.jl"))
-include(joinpath("rrules", "low_level_maths.jl"))
-include(joinpath("rrules", "misc.jl"))
-include(joinpath("rrules", "misty_closures.jl"))
-include(joinpath("rrules", "new.jl"))
-include(joinpath("rrules", "random.jl"))
-include(joinpath("rrules", "tasks.jl"))
-include(joinpath("rrules", "twice_precision.jl"))
-@static if VERSION >= v"1.11-rc4"
-    include(joinpath("rrules", "memory.jl"))
-else
-    include(joinpath("rrules", "array_legacy.jl"))
-end
-include(joinpath("rrules", "performance_patches.jl"))
-
 include("interface.jl")
+
+include(joinpath("rules", "avoiding_non_differentiable_code.jl"))
+include(joinpath("rules", "blas.jl"))
+include(joinpath("rules", "builtins.jl"))
+include(joinpath("rules", "complex.jl"))
+include(joinpath("rules", "dispatch_doctor.jl"))
+include(joinpath("rules", "fastmath.jl"))
+include(joinpath("rules", "foreigncall.jl"))
+include(joinpath("rules", "iddict.jl"))
+include(joinpath("rules", "lapack.jl"))
+include(joinpath("rules", "linear_algebra.jl"))
+include(joinpath("rules", "low_level_maths.jl"))
+include(joinpath("rules", "misc.jl"))
+include(joinpath("rules", "misty_closures.jl"))
+include(joinpath("rules", "new.jl"))
+include(joinpath("rules", "random.jl"))
+include(joinpath("rules", "tasks.jl"))
+include(joinpath("rules", "twice_precision.jl"))
+@static if VERSION >= v"1.11-rc4"
+    include(joinpath("rules", "memory.jl"))
+else
+    include(joinpath("rules", "array_legacy.jl"))
+end
+
+include(joinpath("rules", "performance_patches.jl"))
+include(joinpath("rules", "high_order_derivative_patches.jl"))
+
 include("config.jl")
 include("developer_tools.jl")
 
