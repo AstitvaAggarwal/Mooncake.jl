@@ -216,6 +216,11 @@ end
 # atomic_pointerreplace
 
 @intrinsic atomic_pointerset
+function frule!!(::Dual{typeof(atomic_pointerset)}, p, x, order)
+    atomic_pointerset(primal(p), primal(x), primal(order))
+    atomic_pointerset(tangent(p), tangent(x), primal(order))
+    return p
+end
 function rrule!!(::CoDual{typeof(atomic_pointerset)}, p::CoDual{<:Ptr}, x::CoDual, order)
     _p = primal(p)
     _order = primal(order)
@@ -229,7 +234,7 @@ function rrule!!(::CoDual{typeof(atomic_pointerset)}, p::CoDual{<:Ptr}, x::CoDua
         return NoRData(), NoRData(), rdata(dx_r), NoRData()
     end
     atomic_pointerset(_p, primal(x), _order)
-    atomic_pointerset(dp, zero_tangent(x.x, x.dx), _order)
+    atomic_pointerset(dp, zero_tangent(primal(x), tangent(x)), _order)
     return p, atomic_pointerset_pullback!!
 end
 
@@ -638,7 +643,7 @@ function rrule!!(::CoDual{typeof(pointerset)}, p, x, idx, z)
         return NoRData(), NoRData(), rdata(dx_r), NoRData(), NoRData()
     end
     pointerset(_p, primal(x), _idx, _z)
-    pointerset(dp, zero_tangent(x.x, x.dx), _idx, _z)
+    pointerset(dp, zero_tangent(primal(x), tangent(x)), _idx, _z)
     return p, pointerset_pullback!!
 end
 
@@ -1507,11 +1512,8 @@ function derived_rule_test_cases(rng_ctor, ::Val{:builtins})
             false,
             :none,
             nothing,
-            (x, v) -> unsafe_wrap(
-                Array,
-                pointerset(pointer(x), pointer(v), 1, 1),
-                length(x),
-            ),
+            (x, v) ->
+                unsafe_wrap(Array, pointerset(pointer(x), pointer(v), 1, 1), length(x)),
             CoDual(c, dc),
             CoDual(c_new_val, dc_new_val),
         ),
