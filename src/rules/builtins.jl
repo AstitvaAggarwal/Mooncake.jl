@@ -210,7 +210,10 @@ end
 @inactive_intrinsic and_int
 @inactive_intrinsic ashr_int
 
-# unsafe_wrap() just gives an array view for the memory pointed by p.
+# unsafe_wrap() gives an array view for the memory pointed by p.
+# Tangent propagation happens through memory aliasing rather than explicit
+# computation in the pullback. Downstream rules write directly into 
+# the tangent memory pointed to by tangent_arr.
 @is_primitive MinimalCtx Tuple{typeof(unsafe_wrap),Type{Array},Ptr,Any}
 
 function frule!!(
@@ -257,7 +260,10 @@ function rrule!!(::CoDual{typeof(atomic_pointerset)}, p::CoDual{<:Ptr}, x::CoDua
         atomic_pointerset(dp, old_tangent, _order)
         return NoRData(), NoRData(), rdata(dx_r), NoRData()
     end
+
     atomic_pointerset(_p, primal(x), _order)
+    # zero_tangent(primal(x), tangent(x)) is used to correctly handle
+    # Ptr types, whose tangent is purely fdata (a Ptr) with NoRData.
     atomic_pointerset(dp, zero_tangent(primal(x), tangent(x)), _order)
     return p, atomic_pointerset_pullback!!
 end
@@ -666,7 +672,10 @@ function rrule!!(::CoDual{typeof(pointerset)}, p, x, idx, z)
         pointerset(dp, old_tangent, _idx, _z)
         return NoRData(), NoRData(), rdata(dx_r), NoRData(), NoRData()
     end
+
     pointerset(_p, primal(x), _idx, _z)
+    # zero_tangent(primal(x), tangent(x)) is used to correctly handle
+    # Ptr types, whose tangent is purely fdata (a Ptr) with NoRData.
     pointerset(dp, zero_tangent(primal(x), tangent(x)), _idx, _z)
     return p, pointerset_pullback!!
 end
@@ -1179,7 +1188,7 @@ function hand_written_rule_test_cases(rng_ctor, ::Val{:builtins})
         # atomic_pointerreplace -- NEEDS IMPLEMENTING AND TESTING
         (
             true,
-            :none,
+            :stability,
             nothing,
             IntrinsicsWrappers.atomic_pointerset,
             CoDual(p, dp),
@@ -1460,6 +1469,7 @@ function hand_written_rule_test_cases(rng_ctor, ::Val{:builtins})
         (false, :stability, nothing, typeassert, randn(5), Vector{Float64}),
         (false, :stability, nothing, typeof, 5.0),
         (false, :stability, nothing, typeof, randn(5)),
+        (true, :stability, nothing, unsafe_wrap, Array, CoDual(p, dp), 1),
     ]
 
     if VERSION > v"1.12-"
