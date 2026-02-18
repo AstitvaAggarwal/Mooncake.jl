@@ -210,6 +210,30 @@ end
 @inactive_intrinsic and_int
 @inactive_intrinsic ashr_int
 
+# unsafe_wrap() just gives an array view for the memory pointed by p.
+@is_primitive MinimalCtx Tuple{typeof(unsafe_wrap),Type{Array},Ptr,Any}
+
+function frule!!(
+    ::Dual{typeof(unsafe_wrap)}, ::Dual{Type{Array}}, p::Dual{<:Ptr{T}}, dims::Dual
+) where {T}
+    primal_arr = unsafe_wrap(Array, primal(p), primal(dims))
+    tangent_arr = unsafe_wrap(Array, tangent(p), primal(dims))
+    return Dual(primal_arr, tangent_arr)
+end
+
+function rrule!!(
+    ::CoDual{typeof(unsafe_wrap)}, ::CoDual{Type{Array}}, p::CoDual{<:Ptr{T}}, dims::CoDual
+) where {T}
+    primal_arr = unsafe_wrap(Array, primal(p), primal(dims))
+    tangent_arr = unsafe_wrap(Array, tangent(p), primal(dims))
+
+    function unsafe_wrap_pullback!!(::NoRData)
+        return NoRData(), NoRData(), NoRData(), NoRData()
+    end
+
+    return CoDual(primal_arr, tangent_arr), unsafe_wrap_pullback!!
+end
+
 # atomic_fence
 # atomic_pointermodify
 # atomic_pointerref
@@ -1509,7 +1533,7 @@ function derived_rule_test_cases(rng_ctor, ::Val{:builtins})
             rand(UInt8, 5),
         ),
         (
-            false,
+            true,
             :none,
             nothing,
             (x, v) ->
@@ -1518,7 +1542,7 @@ function derived_rule_test_cases(rng_ctor, ::Val{:builtins})
             CoDual(c_new_val, dc_new_val),
         ),
         (
-            false,
+            true,
             :none,
             nothing,
             (x, v) -> unsafe_wrap(
