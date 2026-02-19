@@ -215,7 +215,6 @@ end
 # computation in the pullback. Downstream rules write directly into 
 # the tangent memory pointed to by tangent_arr.
 @is_primitive MinimalCtx Tuple{typeof(unsafe_wrap),Type{Array},Ptr,Any}
-
 function frule!!(
     ::Dual{typeof(unsafe_wrap)}, ::Dual{Type{Array}}, p::Dual{<:Ptr{T}}, dims::Dual
 ) where {T}
@@ -229,7 +228,6 @@ function rrule!!(
 ) where {T}
     primal_arr = unsafe_wrap(Array, primal(p), primal(dims))
     tangent_arr = unsafe_wrap(Array, tangent(p), primal(dims))
-
     function unsafe_wrap_pullback!!(::NoRData)
         return NoRData(), NoRData(), NoRData(), NoRData()
     end
