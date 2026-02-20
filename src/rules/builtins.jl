@@ -214,9 +214,9 @@ end
 # Tangent propagation happens through memory aliasing rather than explicit
 # computation in the pullback. Downstream rules write directly into 
 # the tangent memory pointed to by tangent_arr.
-@is_primitive MinimalCtx Tuple{typeof(unsafe_wrap),Type{Array},Ptr,Any}
+@is_primitive MinimalCtx Tuple{typeof(unsafe_wrap),<:Type{<:Array},Ptr,Any}
 function frule!!(
-    ::Dual{typeof(unsafe_wrap)}, ::Dual{Type{Array}}, p::Dual{<:Ptr{T}}, dims::Dual
+    ::Dual{typeof(unsafe_wrap)}, ::Dual{<:Type{<:Array}}, p::Dual{<:Ptr{T}}, dims::Dual
 ) where {T}
     primal_arr = unsafe_wrap(Array, primal(p), primal(dims))
     tangent_arr = unsafe_wrap(Array, tangent(p), primal(dims))
@@ -224,7 +224,10 @@ function frule!!(
 end
 
 function rrule!!(
-    ::CoDual{typeof(unsafe_wrap)}, ::CoDual{Type{Array}}, p::CoDual{<:Ptr{T}}, dims::CoDual
+    ::CoDual{typeof(unsafe_wrap)},
+    ::CoDual{<:Type{<:Array}},
+    p::CoDual{<:Ptr{T}},
+    dims::CoDual,
 ) where {T}
     primal_arr = unsafe_wrap(Array, primal(p), primal(dims))
     tangent_arr = unsafe_wrap(Array, tangent(p), primal(dims))
@@ -1468,6 +1471,7 @@ function hand_written_rule_test_cases(rng_ctor, ::Val{:builtins})
         (false, :stability, nothing, typeof, 5.0),
         (false, :stability, nothing, typeof, randn(5)),
         (true, :stability, nothing, unsafe_wrap, Array, CoDual(p, dp), 1),
+        (true, :stability, nothing, unsafe_wrap, Vector{Float64}, CoDual(p, dp), 1),
     ]
 
     if VERSION > v"1.12-"
