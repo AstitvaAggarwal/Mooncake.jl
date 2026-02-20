@@ -1510,7 +1510,7 @@ function derived_rule_test_cases(rng_ctor, ::Val{:builtins})
         c_2 = Ref(x * 2.0)
         p = Ref(Base.unsafe_convert(Ptr{Float64}, c_1))
         GC.@preserve c_1 c_2 p begin
-            atomic_pointerset(
+            Core.Intrinsics.atomic_pointerset(
                 Base.unsafe_convert(Ptr{Ptr{Float64}}, p),
                 Base.unsafe_convert(Ptr{Float64}, c_2),
                 :monotonic,

@@ -70,49 +70,6 @@ foo_throws(e) = throw(e)
         @test res == CoDual(Ptr{Float64}(5), Ptr{Float64}(5))
     end
 
-    @testset "pointer-to-pointer pointerset & atomic_pointerset correctness tests" begin
-        function f_pointerset(x)
-            c_1 = Ref(x)
-            c_2 = Ref(x * 2.0)
-            p = Ref(Base.unsafe_convert(Ptr{Float64}, c_1))
-            GC.@preserve c_1 c_2 p begin
-                pointerset(
-                    Base.unsafe_convert(Ptr{Ptr{Float64}}, p),
-                    Base.unsafe_convert(Ptr{Float64}, c_2),
-                    1,
-                    1,
-                )
-                unsafe_load(p[])
-            end
-        end
-
-        function f_atomic_pointerset(x)
-            c_1 = Ref(x)
-            c_2 = Ref(x * 2.0)
-            p = Ref(Base.unsafe_convert(Ptr{Float64}, c_1))
-            GC.@preserve c_1 c_2 p begin
-                atomic_pointerset(
-                    Base.unsafe_convert(Ptr{Ptr{Float64}}, p),
-                    Base.unsafe_convert(Ptr{Float64}, c_2),
-                    :monotonic,
-                )
-                unsafe_load(p[])
-            end
-        end
-
-        val_p, grad_p = value_and_gradient!!(
-            build_rrule(f_pointerset, 3.0), f_pointerset, 3.0
-        )
-        @test val_p ≈ 6.0
-        @test grad_p[2] ≈ 2.0
-
-        val_a, grad_a = value_and_gradient!!(
-            build_rrule(f_atomic_pointerset, 3.0), f_atomic_pointerset, 3.0
-        )
-        @test val_a ≈ 6.0
-        @test grad_a[2] ≈ 2.0
-    end
-
     @testset "throw" begin
         # Throw primitive continues to throw the exception it is meant to.
         @test_throws(
@@ -136,6 +93,47 @@ foo_throws(e) = throw(e)
             rule_assert(zero_fcodual(foo_throws), zero_fcodual(AssertionError("hmmm")))
         )
     end
+end
+
+@testset "pointer-to-pointer pointerset & atomic_pointerset correctness tests" begin
+    function f_pointerset(x)
+        c_1 = Ref(x)
+        c_2 = Ref(x * 2.0)
+        p = Ref(Base.unsafe_convert(Ptr{Float64}, c_1))
+        GC.@preserve c_1 c_2 p begin
+            Core.Intrinsics.pointerset(
+                Base.unsafe_convert(Ptr{Ptr{Float64}}, p),
+                Base.unsafe_convert(Ptr{Float64}, c_2),
+                1,
+                1,
+            )
+            unsafe_load(p[])
+        end
+    end
+
+    function f_atomic_pointerset(x)
+        c_1 = Ref(x)
+        c_2 = Ref(x * 2.0)
+        p = Ref(Base.unsafe_convert(Ptr{Float64}, c_1))
+        GC.@preserve c_1 c_2 p begin
+            Core.Intrinsics.atomic_pointerset(
+                Base.unsafe_convert(Ptr{Ptr{Float64}}, p),
+                Base.unsafe_convert(Ptr{Float64}, c_2),
+                :monotonic,
+            )
+            unsafe_load(p[])
+        end
+    end
+
+    val_p, grad_p = value_and_gradient!!(build_rrule(f_pointerset, 3.0), f_pointerset, 3.0)
+    @test val_p ≈ 6.0
+    @test grad_p[2] ≈ 2.0
+
+    val_a, grad_a = value_and_gradient!!(
+        build_rrule(f_atomic_pointerset, 3.0), f_atomic_pointerset, 3.0
+    )
+    @test val_a ≈ 6.0
+    @test grad_a[2] ≈ 2.0
 end
 
 @testset "NaN handling in builtins rrules" begin
