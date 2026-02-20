@@ -1489,6 +1489,36 @@ function derived_rule_test_cases(rng_ctor, ::Val{:builtins})
     cs, dcs = __pointers_to_pointers()
     (c_1, c_2, c, c_new_val) = cs
     (dc_1, dc_2, dc, dc_new_val) = dcs
+
+    function f_pointerset(x)
+        c_1 = Ref(x)
+        c_2 = Ref(x * 2.0)
+        p = Ref(Base.unsafe_convert(Ptr{Float64}, c_1))
+        GC.@preserve c_1 c_2 p begin
+            pointerset(
+                Base.unsafe_convert(Ptr{Ptr{Float64}}, p),
+                Base.unsafe_convert(Ptr{Float64}, c_2),
+                1,
+                1,
+            )
+            unsafe_load(p[])
+        end
+    end
+
+    function f_atomic_pointerset(x)
+        c_1 = Ref(x)
+        c_2 = Ref(x * 2.0)
+        p = Ref(Base.unsafe_convert(Ptr{Float64}, c_1))
+        GC.@preserve c_1 c_2 p begin
+            atomic_pointerset(
+                Base.unsafe_convert(Ptr{Ptr{Float64}}, p),
+                Base.unsafe_convert(Ptr{Float64}, c_2),
+                :monotonic,
+            )
+            unsafe_load(p[])
+        end
+    end
+
     test_cases = Any[
         (false, :none, nothing, _apply_iterate_equivalent, Base.iterate, *, 5.0, 4.0),
         (false, :none, nothing, _apply_iterate_equivalent, Base.iterate, *, (5.0, 4.0)),
@@ -1561,6 +1591,8 @@ function derived_rule_test_cases(rng_ctor, ::Val{:builtins})
             CoDual(c, dc),
             CoDual(c_new_val, dc_new_val),
         ),
+        (true, :none, nothing, f_pointerset, CoDual(3.0, 1.0)),
+        (true, :none, nothing, f_atomic_pointerset, CoDual(3.0, 1.0)),
         (false, :none, nothing, getindex, randn(5), [1, 1]),
         (false, :none, nothing, getindex, randn(5), [1, 2, 2]),
         (false, :none, nothing, setindex!, randn(5), [4.0, 5.0], [1, 1]),
