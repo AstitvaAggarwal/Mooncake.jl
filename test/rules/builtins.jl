@@ -125,13 +125,13 @@ end
         end
     end
 
-    val_p, grad_p = value_and_gradient!!(build_rrule(f_pointerset, 3.0), f_pointerset, 3.0)
+    cache_p = prepare_gradient_cache(f_pointerset, 3.0)
+    val_p, grad_p = value_and_gradient!!(cache_p, f_pointerset, 3.0)
     @test val_p ≈ 6.0
     @test grad_p[2] ≈ 2.0
 
-    val_a, grad_a = value_and_gradient!!(
-        build_rrule(f_atomic_pointerset, 3.0), f_atomic_pointerset, 3.0
-    )
+    cache_a = prepare_gradient_cache(f_atomic_pointerset, 3.0)
+    val_a, grad_a = value_and_gradient!!(cache_a, f_atomic_pointerset, 3.0)
     @test val_a ≈ 6.0
     @test grad_a[2] ≈ 2.0
 end
