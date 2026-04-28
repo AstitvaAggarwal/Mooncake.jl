@@ -20,15 +20,15 @@ function vmap_rule!! end
 # Takes the already-batched field values and wraps them in a NamedTuple.
 @inline function _construct_struct_batch(::Type{P}, batched_fields...) where P
     nt = NamedTuple{fieldnames(P)}(batched_fields)
-    return ismutabletype(P) ? MutableTangent(nt) : Tangent(nt)
+    return ismutabletype(P) ? MutableBatchStruct(nt) : BatchStruct(nt)
 end
 
-# Tuple construction: Core.tuple(a, b, …) in the lifted IR → Tangent with :_1,:_2,… names.
+# Tuple construction: Core.tuple(a, b, …) in the lifted IR → BatchStruct with :_1,:_2,… names.
 # N is fixed at compile time from the type parameters, so ntuple is fully inlined.
 @generated function _construct_tuple_batch(batched_fields...)
     N     = length(batched_fields)
     names = ntuple(i -> Symbol(:_, i), N)
-    return :(Tangent(NamedTuple{$names}(batched_fields)))
+    return :(BatchStruct(NamedTuple{$names}(batched_fields)))
 end
 
 # NamedTuple construction: %new(NamedTuple{names,T}, f1, f2, …) in the lifted IR.
@@ -36,7 +36,7 @@ end
 @inline function _construct_namedtuple_batch(
     ::Type{P}, batched_fields...
 ) where {names, T<:Tuple, P<:NamedTuple{names,T}}
-    return Tangent(NamedTuple{names}(batched_fields))
+    return BatchStruct(NamedTuple{names}(batched_fields))
 end
 
 # ── batch control-flow helper ─────────────────────────────────────────────────
@@ -69,51 +69,133 @@ struct DerivedVmap{primal_sig,Tlifted_oc,isva,nargs}
     lifted_oc::Tlifted_oc
 end
 
+# Pack vararg tail into a batched tuple before calling the lifted OC.
+# Mirrors __unflatten_dual_varargs in primal_mode.jl: for isva=true, nargs=2, args
+# (f_batch, a_batch, b_batch) → (f_batch, Tangent{(_1=a_batch, _2=b_batch)}).
+function __unflatten_batch_varargs(isva::Bool, args, ::Val{nargs}) where {nargs}
+    isva || return args
+    rest = args[nargs:end]
+    return (args[1:(nargs - 1)]..., _construct_tuple_batch(rest...))
+end
+
 @inline function (fwd::DerivedVmap{P,T,isva,nargs})(
     args::Vararg{Any,N}
 ) where {P,T,N,isva,nargs}
-    return fwd.lifted_oc(args...)
+    return fwd.lifted_oc(__unflatten_batch_varargs(isva, args, Val(nargs))...)
 end
 
 _copy(x::P) where {P<:DerivedVmap} =
     P(replace_captures(x.lifted_oc, _copy(x.lifted_oc.oc.captures)))
 
-# ── LazyVmap / DynamicVmap: call handlers ────────────────────────────────────
-#
-# For each function call site in the lifted IR, the function f arrives as:
-#   - A plain function object (from a GlobalRef in the primal IR) - NOT batched
-#   - Or a Vector{typeof(f)} (if f itself was a batched argument) - batched
-#
-# In either case, we extract the scalar function and broadcast it over the
-# remaining (possibly batched) arguments.  Non-batched scalars (Int, Bool, …)
-# broadcast correctly as singletons.
+# Pre-compute the concrete type of the DerivedVmap that build_vmap will return for a
+# given method instance and VmapMode.  Mirrors primal_rule_type in primal_mode.jl but
+# uses batch_type instead of dual_type.  Called once at LazyVmap construction time so
+# that rule.rule has a fully concrete type and rule.rule(args...) is type-stable.
+function vmap_rule_type(
+    interp::MooncakeInterpreter, mi::Core.MethodInstance, mode::VmapMode; debug_mode
+)
+    ir, _ = lookup_ir(interp, mi)
+    nargs = length(ir.argtypes)
+    isva, _ = is_vararg_and_sparam_names(mi)
+    arg_types = map(CC.widenconst, ir.argtypes)
+    sig = Tuple{arg_types...}
+    batched_args_type = Tuple{map(Base.Fix1(_lift_type, mode), arg_types)...}
+    batched_ret = _lift_type(mode, compute_ir_rettype(ir))
+    return DerivedVmap{sig, RuleMC{batched_args_type, batched_ret}, isva, nargs}
+end
 
-struct LazyVmap
+# ── LazyVmap: deferred recursive lifting for known :invoke call sites ─────────
+#
+# Mirrors LazyPrimal in primal_mode.jl.  The rule field is left uninitialised on
+# construction; on the first call _build_vmap_rule! compiles a DerivedVmap for the
+# callee's MI and caches it in rule.rule.  All subsequent calls go directly through
+# the compiled DerivedVmap with zero dispatch overhead.
+
+mutable struct LazyVmap{primal_sig, Trule}
     debug_mode::Bool
     mode::VmapMode
     mi::Core.MethodInstance
+    rule::Trule
+    function LazyVmap(mi::Core.MethodInstance, debug_mode::Bool, mode::VmapMode)
+        interp = get_interpreter(PrimalMode)
+        return new{mi.specTypes, vmap_rule_type(interp, mi, mode; debug_mode)}(
+            debug_mode, mode, mi
+        )
+    end
+    function LazyVmap{Tprimal_sig, Trule}(
+        mi::Core.MethodInstance, debug_mode::Bool, mode::VmapMode
+    ) where {Tprimal_sig, Trule}
+        return new{Tprimal_sig, Trule}(debug_mode, mode, mi)
+    end
 end
 
-_copy(x::LazyVmap) = LazyVmap(x.debug_mode, x.mode, x.mi)
+_copy(x::P) where {P<:LazyVmap} = P(x.mi, x.debug_mode, x.mode)
 
 @inline function (rule::LazyVmap)(args::Vararg{Any,N}) where {N}
-    f = args[1] isa AbstractVector ? first(args[1]) : args[1]
-    return _pack_batch(collect(broadcast(f, args[2:end]...)))
+    return isdefined(rule, :rule) ? rule.rule(args...) : _build_vmap_rule!(rule, args)
 end
+
+@noinline function _build_vmap_rule!(rule::LazyVmap, args)
+    interp = get_interpreter(PrimalMode)
+    rule.rule = build_vmap(interp, rule.mi, rule.mode; debug_mode=rule.debug_mode)
+    return rule.rule(args...)
+end
+
+# ── DynamicVmap: runtime-recovery lifting for dynamic :call sites ────────────
+#
+# Mirrors DynamicPrimal in primal_mode.jl.  primal_data_types is the Tuple of
+# primal data-arg types baked at IR-generation time (we cannot recover them at
+# runtime from BatchStruct).  f_type is NOT baked: typeof(f) is recovered at
+# runtime so abstract f_type at IR-gen is handled naturally (first call builds
+# and caches the rule for the concrete function type seen at runtime).
+#
+# Call order at runtime:
+#   1. vmap_rule!! (registered primitives, BLAS, element-wise catch-alls)
+#   2. build_vmap keyed on Tuple{typeof(f), primal_data_types...} — lazy, cached
+#      If build_vmap fails (builtin / intrinsic: no Julia IR), nothing is cached
+#      and we fall through to broadcast (Q1 fix: no hard error).
+#   3. broadcast fallback — fires when primal_data_types === nothing (abstract
+#      data types at IR-gen time) or when build_vmap found no Julia IR.
 
 struct DynamicVmap
+    cache::Dict{Any,Any}
     debug_mode::Bool
     mode::VmapMode
+    primal_data_types::Union{Nothing,Type}  # Tuple{data_types...}; nothing if any data type is abstract
 end
 
-_copy(x::DynamicVmap) = DynamicVmap(x.debug_mode, x.mode)
+DynamicVmap(debug_mode::Bool, mode::VmapMode, primal_data_types::Union{Nothing,Type}) =
+    DynamicVmap(Dict{Any,Any}(), debug_mode, mode, primal_data_types)
+
+_copy(x::DynamicVmap) = DynamicVmap(Dict{Any,Any}(), x.debug_mode, x.mode, x.primal_data_types)
 
 @inline function (dv::DynamicVmap)(args::Vararg{Any,N}) where {N}
     f = args[1] isa AbstractVector ? first(args[1]) : args[1]
     data_args = args[2:end]
-    # Runtime fallback to vmap_rule!! for cases where compile-time dispatch missed
-    # (e.g. getfield on Tangent via a :call node rather than :invoke in the primal IR).
+
+    # 1. Registered primitive rules (BLAS, intrinsics, element-wise catch-alls).
     applicable(vmap_rule!!, f, data_args...) && return vmap_rule!!(f, data_args...)
+
+    # 2. Runtime sig: recover typeof(f) now; data types were baked at IR-gen time.
+    if dv.primal_data_types !== nothing
+        runtime_sig = Tuple{typeof(f), dv.primal_data_types.parameters...}
+        compiled = get!(dv.cache, runtime_sig) do
+            try
+                build_vmap(
+                    get_interpreter(PrimalMode), runtime_sig, dv.mode;
+                    debug_mode=dv.debug_mode,
+                )
+            catch
+                nothing  # builtin / intrinsic: no Julia IR — fall through to broadcast
+            end
+        end
+        if compiled !== nothing
+            f_batched = args[1] isa AbstractVector ? args[1] : fill(f, dv.mode.batch_size)
+            return compiled(f_batched, data_args...)
+        end
+    end
+
+    # 3. Broadcast fallback.
     return _pack_batch(collect(broadcast(f, data_args...)))
 end
 
@@ -309,54 +391,29 @@ function modify_vmap_stmts!(
     return nothing
 end
 
-function modify_vmap_stmts!(
-    stmt::UpsilonNode,
-    lifted_ir::IRCode,
-    ssa::SSAValue,
-    captures::Vector{Any},
-    info::VmapLiftedInfo,
-)
-    if !(stmt.val isa Union{Argument,SSAValue})
-        v = get_const_primal_value(stmt.val)
-        T = typeof(v)
-        stmt = UpsilonNode(batch_type(T) == T ? v : _make_batch(v, info.mode.batch_size))
-    end
-    set_stmt!(lifted_ir, ssa, inc_args(stmt))
-    set_ir!(
-        lifted_ir, ssa, :type,
-        _lift_type(info.mode, CC.widenconst(get_ir(lifted_ir, ssa, :type))),
-    )
-    return nothing
-end
 
-function modify_vmap_stmts!(
-    stmt::PhiCNode,
-    lifted_ir::IRCode,
-    ssa::SSAValue,
-    captures::Vector{Any},
-    info::VmapLiftedInfo,
-)
-    for n in eachindex(stmt.values)
-        isassigned(stmt.values, n) || continue
-        stmt.values[n] isa Union{Argument,SSAValue} && continue
-        v = get_const_primal_value(stmt.values[n])
-        T = typeof(v)
-        stmt.values[n] = batch_type(T) == T ? v : _make_batch(v, info.mode.batch_size)
-    end
-    set_stmt!(lifted_ir, ssa, inc_args(stmt))
-    set_ir!(
-        lifted_ir, ssa, :type,
-        _lift_type(info.mode, CC.widenconst(get_ir(lifted_ir, ssa, :type))),
-    )
-    return nothing
-end
+# ── Call arg lifting ─────────────────────────────────────────────────────────
+#
+# All other statement types (PhiNode, ReturnNode, UpsilonNode, GlobalRef) already
+# pre-batch constant literals via _make_batch at IR-gen time.  :call args must do
+# the same: a literal like 1.0 in add_float(x, 1.0) must arrive as a BatchContainer
+# so that _compile_time_vmap_rule's hasmethod check (which computed lifted_types from
+# get_forward_primal_type → Float64 → BatchContainer) fires correctly at runtime.
+#
+# Non-batchable constants (Int, Bool, Symbol, …) where batch_type(T)==T pass through
+# unchanged — rules handle them directly (e.g. getindex(t::Tangent, idx::Int)).
 
-@static if isdefined(Core, :EnterNode)
-    function modify_vmap_stmts!(
-        ::Core.EnterNode, ::IRCode, ::SSAValue, ::Vector{Any}, ::VmapLiftedInfo
-    )
-        return nothing
-    end
+function _lift_call_arg!(
+    lifted_ir::IRCode, ssa::SSAValue, arg, captures::Vector{Any}, info::VmapLiftedInfo
+)
+    arg isa Union{Argument,SSAValue} && return __inc(arg)
+    v = get_const_primal_value(arg)
+    T = CC.widenconst(get_forward_primal_type(info.primal_ir, arg))
+    batch_type(T) == T && return v
+    b = _make_batch(v, info.mode.batch_size)
+    push!(captures, b)
+    get_b = Expr(:call, get_capture, Argument(1), length(captures))
+    return CC.insert_node!(lifted_ir, ssa, new_inst(get_b), ATTACH_BEFORE)
 end
 
 # ── Compile-time vmap_rule!! resolution ──────────────────────────────────────
@@ -418,7 +475,6 @@ function modify_vmap_stmts!(
 )
     if isexpr(stmt, :invoke) || isexpr(stmt, :call)
         raw_args = isexpr(stmt, :invoke) ? stmt.args[2:end] : stmt.args
-        args = map(__inc, raw_args)
         mi = isexpr(stmt, :invoke) ? get_mi(stmt.args[1]) : missing
 
         # Attempt compile-time dispatch to vmap_rule!!.
@@ -428,21 +484,32 @@ function modify_vmap_stmts!(
 
         if rule !== nothing
             # Primitive path: bake the rule (with function fixed) into captures.
-            # Emit a call with only the batch data args - no runtime function extraction.
+            # Pre-batch constant data args so the rule always receives BatchContainers.
             push!(captures, rule)
             get_rule = Expr(:call, get_capture, Argument(1), length(captures))
             rule_ssa = CC.insert_node!(lifted_ir, ssa, new_inst(get_rule), ATTACH_BEFORE)
-            replace_call!(lifted_ir, ssa, Expr(:call, rule_ssa, args[2:end]...))
+            data_args = map(a -> _lift_call_arg!(lifted_ir, ssa, a, captures, info), raw_args[2:end])
+            replace_call!(lifted_ir, ssa, Expr(:call, rule_ssa, data_args...))
         else
             # Fallback path: LazyVmap (known invoke) or DynamicVmap (dynamic call).
             dm = info.debug_mode
-            push!(
-                captures,
-                isexpr(stmt, :invoke) ? LazyVmap(dm, info.mode, mi) : DynamicVmap(dm, info.mode),
-            )
+            fallback = if isexpr(stmt, :invoke)
+                LazyVmap(mi, dm, info.mode)
+            else
+                data_types = map(
+                    a -> CC.widenconst(get_forward_primal_type(info.primal_ir, a)),
+                    raw_args[2:end],
+                )
+                # f_type is intentionally excluded: typeof(f) is recovered at runtime
+                # so abstract f_type at IR-gen is handled correctly (Q3 fix).
+                primal_data_types = all(isconcretetype, data_types) ? Tuple{data_types...} : nothing
+                DynamicVmap(dm, info.mode, primal_data_types)
+            end
+            push!(captures, fallback)
             get_rule = Expr(:call, get_capture, Argument(1), length(captures))
             rule_ssa = CC.insert_node!(lifted_ir, ssa, new_inst(get_rule), ATTACH_BEFORE)
-            replace_call!(lifted_ir, ssa, Expr(:call, rule_ssa, args...))
+            all_args = map(a -> _lift_call_arg!(lifted_ir, ssa, a, captures, info), raw_args)
+            replace_call!(lifted_ir, ssa, Expr(:call, rule_ssa, all_args...))
         end
 
     elseif isexpr(stmt, :new)
@@ -574,13 +641,22 @@ VmappedFn(f) = VmappedFn(f, Dict{Any, Any}(), ReentrantLock())
 function (vf::VmappedFn{F})(xs::AbstractVector{T}) where {F, T}
     N = length(xs)
     N == 0 && return similar(xs, Any, 0)
+    batch_type(T) == T && return map(vf.f, xs)
     rule = lock(vf.lock) do
         get!(vf.cache, (T, N)) do
             build_vmap(get_interpreter(PrimalMode), Tuple{F, T}, VmapMode(N))
         end
     end
-    batched_xs = batch_type(T) == T ? xs : _wrap_input(xs)
-    return rule(fill(vf.f, N), batched_xs)
+    return rule(fill(vf.f, N), _wrap_input(xs))
+end
+
+# Nested vmap: vmap(vmap(f))(xss) where xss::Vector{Vector{T}}.
+# More specific than the general method above (F<:VmappedFn + Vector{Vector{T}} input),
+# so Julia picks this before trying to lift VmappedFn.__call__'s IR.
+function (vf::VmappedFn{<:VmappedFn})(xs::AbstractVector{<:AbstractVector{T}}) where {T<:_VmapScalar}
+    N = length(xs)
+    N == 0 && return similar(xs, Any, 0)
+    return vmap_rule!!(vf.f, _wrap_input(xs))
 end
 
 """
@@ -611,21 +687,28 @@ Every call recompiles. Prefer `vmap(f)` when calling `f` more than once.
 function vmap_apply(f, xs::AbstractVector{T}) where {T}
     N = length(xs)
     N == 0 && return similar(xs, Any, 0)
+    batch_type(T) == T && return map(f, xs)
     rule = build_vmap(get_interpreter(PrimalMode), Tuple{typeof(f), T}, VmapMode(N))
-    batched_xs = batch_type(T) == T ? xs : _wrap_input(xs)
-    return rule(fill(f, N), batched_xs)
+    return rule(fill(f, N), _wrap_input(xs))
+end
+
+# Nested vmap_apply: vmap_apply(vmap(f), xss) where xss::Vector{Vector{T}}.
+function vmap_apply(vf::VmappedFn, xs::AbstractVector{<:AbstractVector{T}}) where {T<:_VmapScalar}
+    N = length(xs)
+    N == 0 && return similar(xs, Any, 0)
+    return vmap_rule!!(vf, _wrap_input(xs))
 end
 
 """
-    _wrap_input(xs::AbstractVector) → BatchContainer or Tangent
+    _wrap_input(xs::AbstractVector) → BatchContainer or BatchStruct
 
 Pack a user-supplied vector of inputs into the canonical SoA form expected by a compiled
 `DerivedVmap`. Dispatches on the element type:
 
 - `_VmapScalar` (Float32/64, Complex): contiguous `BatchContainer` backed by a dense array
 - `AbstractArray{<:_VmapScalar}`: same-device `BatchContainer` via `similar` (GPU-safe)
-- `Tuple` / `NamedTuple`: `Tangent` of per-field `BatchContainer`s (`@generated`)
-- `@struct_batch` struct: `Tangent`/`MutableTangent` of per-field `BatchContainer`s
+- `Tuple` / `NamedTuple`: `BatchStruct` of per-field `BatchContainer`s (`@generated`)
+- `@struct_batch` struct: `BatchStruct`/`MutableBatchStruct` of per-field `BatchContainer`s
 - Anything else: returned unchanged (treated as AoS; no batching)
 """
 _wrap_input(xs::AbstractVector{T}) where {T<:_VmapScalar} =
@@ -654,33 +737,33 @@ function _wrap_input(xs::AbstractVector{P}) where {E<:_VmapScalar, P<:AbstractAr
     end
     return BatchContainer{P, typeof(data)}(data, K+1)
 end
-# Tuples: transpose N tuples into a Tangent of per-element BatchContainers.
+# Tuples: transpose N tuples into a BatchStruct of per-element BatchContainers.
 # @generated so field count and positional names are resolved at code-generation time,
 # making each recursive _wrap_input call type-stable.
 @generated function _wrap_input(xs::AbstractVector{P}) where {P <: Tuple}
     !isconcretetype(P) && return :(xs)
     nfields = fieldcount(P)
-    nfields == 0 && return :(Tangent(NamedTuple{()}(())))
+    nfields == 0 && return :(BatchStruct(NamedTuple{()}(())))
     names = ntuple(i -> Symbol(:_, i), nfields)
     field_exprs = ntuple(nfields) do i
         FT = fieldtype(P, i)
         :(_wrap_input(_vmap_getfield(xs, Val($i))::Vector{$FT}))
     end
-    return :(Tangent(NamedTuple{$names}(tuple($(field_exprs...)))))
+    return :(BatchStruct(NamedTuple{$names}(tuple($(field_exprs...)))))
 end
 
 # NamedTuples: same as Tuple but uses actual field names from the type parameter.
 @generated function _wrap_input(xs::AbstractVector{P}) where {names, T<:Tuple, P<:NamedTuple{names,T}}
     nfields = length(names)
-    nfields == 0 && return :(Tangent(NamedTuple{$names}(())))
+    nfields == 0 && return :(BatchStruct(NamedTuple{$names}(())))
     field_exprs = ntuple(nfields) do i
         FT = fieldtype(P, i)
         :(_wrap_input(_vmap_getfield(xs, Val($i))::Vector{$FT}))
     end
-    return :(Tangent(NamedTuple{$names}(tuple($(field_exprs...)))))
+    return :(BatchStruct(NamedTuple{$names}(tuple($(field_exprs...)))))
 end
 
-# Struct SoA: transpose N structs into Tangent/MutableTangent of per-field BatchContainers.
+# Struct SoA: transpose N structs into BatchStruct/MutableBatchStruct of per-field BatchContainers.
 # Must be a regular function - struct_batchable is user-extensible via @struct_batch and
 # can be added after Mooncake loads. @generated bodies run at the world of the @generated
 # definition and would never see user-registered structs.
@@ -689,7 +772,7 @@ function _wrap_input(xs::AbstractVector{P}) where P
         names   = fieldnames(P)
         batched = ntuple(i -> _wrap_input([getfield(x, i) for x in xs]), fieldcount(P))
         nt = NamedTuple{names}(batched)
-        return ismutabletype(P) ? MutableTangent(nt) : Tangent(nt)
+        return ismutabletype(P) ? MutableBatchStruct(nt) : BatchStruct(nt)
     end
     return xs
 end

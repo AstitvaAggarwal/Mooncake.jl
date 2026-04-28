@@ -9,22 +9,6 @@
         )
     end
 
-    @testset "try-catch" begin
-        rng = StableRNG(123)
-        perf_flag = :none
-        interface_only = false
-        is_primitive = false
-        mode = ForwardMode
-        TestUtils.test_rule(
-            rng,
-            TestResources.try_catch_foo,
-            5.0;
-            perf_flag,
-            interface_only,
-            is_primitive,
-            mode,
-        )
-    end
 
     @testset "capture in ReturnNode regression test" begin
         struct RegTestStruct

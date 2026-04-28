@@ -577,55 +577,6 @@ function modify_primal_stmts!(
     return nothing
 end
 
-function modify_primal_stmts!(
-    stmt::UpsilonNode,
-    lifted_ir::IRCode,
-    ssa::SSAValue,
-    captures::Vector{Any},
-    info::LiftedInfo,
-)
-    if !(stmt.val isa Union{Argument,SSAValue})
-        stmt = UpsilonNode(_uninit_dual(info.width, get_const_primal_value(stmt.val)))
-    end
-    set_stmt!(lifted_ir, ssa, inc_args(stmt))
-    set_ir!(
-        lifted_ir,
-        ssa,
-        :type,
-        _lift_type(info.width, CC.widenconst(get_ir(lifted_ir, ssa, :type))),
-    )
-    return nothing
-end
-
-function modify_primal_stmts!(
-    stmt::PhiCNode,
-    lifted_ir::IRCode,
-    ssa::SSAValue,
-    captures::Vector{Any},
-    info::LiftedInfo,
-)
-    for n in eachindex(stmt.values)
-        isassigned(stmt.values, n) || continue
-        stmt.values[n] isa Union{Argument,SSAValue} && continue
-        stmt.values[n] = _uninit_dual(info.width, get_const_primal_value(stmt.values[n]))
-    end
-    set_stmt!(lifted_ir, ssa, inc_args(stmt))
-    set_ir!(
-        lifted_ir,
-        ssa,
-        :type,
-        _lift_type(info.width, CC.widenconst(get_ir(lifted_ir, ssa, :type))),
-    )
-    return nothing
-end
-
-@static if isdefined(Core, :EnterNode)
-    function modify_primal_stmts!(
-        ::Core.EnterNode, ::IRCode, ::SSAValue, ::Vector{Any}, ::LiftedInfo
-    )
-        return nothing
-    end
-end
 
 ## Modification of IR nodes - expressions
 
